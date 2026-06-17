@@ -3,19 +3,21 @@
 // РАЗМЫВАЮТСЯ. На реальном мониторе окно видно нормально.
 //
 // Как это работает:
-//   Hyprland уже умеет прятать окна из захвата (правило no_screen_share) —
-//   в отдельном проходе CScreenshareFrame::renderMonitor() он рисует mirror-
-//   текстуру монитора в буфер захвата, а поверх noScreenShare-окон заливает
-//   чёрные прямоугольники через g_pHyprRenderer->draw(SRectData{.color=BLACK}).
+//   Захват экрана идёт отдельным проходом CScreenshareFrame::renderMonitor():
+//   Hyprland рисует mirror-текстуру монитора (реальный кадр со всеми окнами) в
+//   буфер захвата, а поверх noScreenShare-окон заливает чёрные прямоугольники
+//   через g_pHyprRenderer->draw(CRectPassElement::SRectData{.color = BLACK}).
 //
-//   Мы вешаем два function-hook'а:
-//     1) renderMonitor — оборачиваем: выставляем флаг "идёт захват" на время вызова.
-//     2) draw(SRectData) — если идёт захват и прямоугольник чёрный непрозрачный,
-//        подменяем его на blur=true с прозрачным цветом. Тот же прямоугольник
-//        теперь размывает уже отрисованную под ним mirror-текстуру окна.
+//   Два function-hook'а:
+//     1) renderMonitor — оборачиваем, выставляя флаг "идёт кадр захвата".
+//     2) draw(SRectData) — если идёт захват и прямоугольник чёрный непрозрачный
+//        (это и есть noScreenShare-окно), вместо заливки берём mirror-текстуру
+//        (в ней реальный кадр окна), прогоняем её через нативный kawase-блюр и
+//        рисуем размытую версию в бокс окна.
 //
-//   Скриншоты (grim) не трогаются — они не идут через renderMonitor с damage,
-//   да и одиночный кадр пользователь контролирует сам. Цель — видео-захват.
+//   Работает для непрерывного видео-захвата (PipeWire/OBS/screencast), где буфер
+//   захвата пересобирается каждый кадр. Одиночные скриншоты обычно копируются из
+//   кэша и не затрагиваются — по дизайну.
 
 #define WLR_USE_UNSTABLE
 
@@ -53,7 +55,8 @@ static void hkRenderMonitor(void* thisptr) {
 
 static void hkDrawRect(void* thisptr, const CRectPassElement::SRectData& data, const CRegion& damage) {
     // Чёрная непрозрачная заливка во время захвата = noScreenShare-окно.
-    // Превращаем её в блюр того, что уже нарисовано под ней (кадр окна).
+    // Превращаем её в blur-прямоугольник: тот же бокс, но blur=true и прозрачный
+    // цвет — размывает то, что уже отрисовано в буфер захвата под этим боксом.
     if (g_inCapture && !data.blur && isBlackOpaque(data.color)) {
         CRectPassElement::SRectData mod = data;
         mod.blur  = true;
@@ -84,30 +87,24 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     }
 
     // Hook 1: CScreenshareFrame::renderMonitor — флаг "идёт захват".
-    {
-        auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, "renderMonitor");
-        for (auto& f : fns) {
-            if (f.demangled.contains("CScreenshareFrame::renderMonitor(")) {
-                g_pRenderMonitorHook = HyprlandAPI::createFunctionHook(PHANDLE, f.address, (void*)&hkRenderMonitor);
-                break;
-            }
+    for (auto& f : HyprlandAPI::findFunctionsByName(PHANDLE, "renderMonitor")) {
+        if (f.demangled.contains("CScreenshareFrame::renderMonitor(")) {
+            g_pRenderMonitorHook = HyprlandAPI::createFunctionHook(PHANDLE, f.address, (void*)&hkRenderMonitor);
+            break;
         }
     }
 
-    // Hook 2: draw(const CRectPassElement::SRectData&, const CRegion&).
-    {
-        auto fns = HyprlandAPI::findFunctionsByName(PHANDLE, "draw");
-        for (auto& f : fns) {
-            if (f.demangled.contains("SRectData")) {
-                g_pDrawRectHook = HyprlandAPI::createFunctionHook(PHANDLE, f.address, (void*)&hkDrawRect);
-                break;
-            }
+    // Hook 2: IHyprRenderer::draw(CRectPassElement::SRectData const&, CRegion const&).
+    for (auto& f : HyprlandAPI::findFunctionsByName(PHANDLE, "draw")) {
+        if (f.demangled.contains("SRectData")) {
+            g_pDrawRectHook = HyprlandAPI::createFunctionHook(PHANDLE, f.address, (void*)&hkDrawRect);
+            break;
         }
     }
 
     if (!g_pRenderMonitorHook || !g_pDrawRectHook) {
         HyprlandAPI::addNotification(PHANDLE,
-            "[blurcap] не нашёл функции для хука (renderMonitor/draw) — несовместимая версия?",
+            "[blurcap] не нашёл функции для хука — несовместимая версия Hyprland?",
             CHyprColor{1.0, 0.2, 0.2, 1.0}, 7000);
         throw std::runtime_error("[blurcap] hook target not found");
     }

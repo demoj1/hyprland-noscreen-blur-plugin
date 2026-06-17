@@ -27,7 +27,7 @@ flagged with `no_screen_share`.
    frame is being rendered right now".
 2. **`CHyprRenderer::draw(SRectData)`** — while a capture frame is rendering, any
    opaque-black rectangle is turned into a `blur = true` rectangle. The same box
-   now blurs the already-drawn window pixels underneath instead of hiding them.
+   now shows a blur in the captured stream instead of a solid black box.
 
 Because it reuses the native `no_screen_share` rule, there is **no plugin-specific
 config** — you flag windows the normal Hyprland way and they get blurred.
@@ -38,6 +38,13 @@ config** — you flag windows the normal Hyprland way and they get blurred.
   where the monitor mirror buffer is continuously refreshed. Single static
   screenshots (`grim`) are generally copied from a cached buffer and are not
   affected — by design (you control a one-off screenshot yourself anyway).
+- **What the blur actually shows:** in full-screen video capture the blur samples
+  the monitor's background layer in the window's area, so you see a *blurred
+  smudge of the wallpaper* where the window is — not a blur of the window's own
+  pixels. The sensitive content is still fully hidden; it just reads as blurred
+  wallpaper rather than a blurred window. (Region/window-scoped screenshots blur
+  the real window content instead — the two capture paths feed the blur different
+  buffers; making video blur the window content reliably is an open problem.)
 - Blur strength is whatever your global `decoration:blur:size` / `passes` are set
   to. There is currently no per-plugin strength knob.
 - Hooks into Hyprland's **internal** API, so it is tied to the Hyprland version it
